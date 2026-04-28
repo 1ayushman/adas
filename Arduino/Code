@@ -1,0 +1,907 @@
+═══════════════════════════════════════════════════════════════════════════════
+        SELF-DRIVING CAR EMBEDDED SYSTEM - PSEUDOCODE
+        Advanced Driver Assistance Systems (ADAS)
+═══════════════════════════════════════════════════════════════════════════════
+
+──────────────────────────────────────────────────────────────────────────────
+1. MAIN SYSTEM INITIALIZATION (Raspberry Pi 4)
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION InitializeSystem():
+    BEGIN
+        // Initialize all hardware peripherals and communication
+        InitializeCamera(resolution=640x480, fps=30)
+        InitializeUltrasonicSensors(numberOfSensors=4)
+        InitializeInfraredSensors(numberOfSensors=2)
+        InitializeUARTCommunication(baudRate=115200)
+        InitializeI2CCommunication(clockSpeed=400kHz)
+        
+        // Load pre-trained machine learning models
+        LoadCascadeClassifier("traffic_light_cascade.xml")
+        LoadCascadeClassifier("stop_sign_cascade.xml")
+        LoadCNNModel("object_detection_model.tflite")
+        
+        // Initialize data structures
+        SensorData = {}
+        ProcessedData = {}
+        ControlCommands = {}
+        
+        // Initialize PID controllers for steering
+        SteeringPID = InitializePIDController(Kp=0.8, Ki=0.2, Kd=0.4)
+        
+        PRINT "System Initialization Complete"
+        RETURN TRUE
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+2. MAIN CONTROL LOOP (Real-time execution at 30 FPS)
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION MainControlLoop():
+    BEGIN
+        WHILE SystemRunning == TRUE DO
+            // Step 1: Acquire sensor data (approximately 50ms)
+            AcquireSensorData()
+            
+            // Step 2: Image processing and feature extraction (approximately 33ms)
+            ProcessFrame()
+            
+            // Step 3: Object detection and recognition (approximately 45ms)
+            DetectObjects()
+            
+            // Step 4: Decision making (approximately 10ms)
+            MakeDecisions()
+            
+            // Step 5: Generate and send motor commands (approximately 5ms)
+            SendMotorCommands()
+            
+            // Frame time = 33.33ms (30 FPS)
+            WaitForNextFrame()
+        END WHILE
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+3. SENSOR DATA ACQUISITION
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION AcquireSensorData():
+    BEGIN
+        // Acquire camera frame
+        SensorData.frame = CaptureFrame()
+        SensorData.frameTimestamp = GetCurrentTime()
+        
+        // Read ultrasonic sensors (distance measurement)
+        FOR i = 1 TO 4 DO
+            distance[i] = ReadUltrasonicSensor(i)
+            SensorData.ultrasonicData[i] = distance[i]
+        END FOR
+        
+        // Read infrared sensors (line tracking)
+        FOR i = 1 TO 2 DO
+            IRValue[i] = ReadInfraredSensor(i)
+            SensorData.infraredData[i] = IRValue[i]
+        END FOR
+        
+        // Request encoder data from TIVA C (via UART)
+        SendUARTCommand("REQUEST_ENCODER_DATA")
+        EncoderData = ReceiveUARTData()
+        SensorData.motorSpeed[LEFT] = EncoderData.leftMotorSpeed
+        SensorData.motorSpeed[RIGHT] = EncoderData.rightMotorSpeed
+        
+        RETURN SensorData
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+4. IMAGE PROCESSING PIPELINE
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION ProcessFrame():
+    BEGIN
+        rawFrame = SensorData.frame
+        
+        // Step 1: Color space conversion (RGB to Grayscale)
+        grayFrame = ConvertToGrayscale(rawFrame)
+        
+        // Step 2: Apply Gaussian blur to reduce noise
+        blurredFrame = ApplyGaussianBlur(grayFrame, kernelSize=5x5, sigma=1.0)
+        
+        // Step 3: Histogram Equalization for better contrast
+        enhancedFrame = HistogramEqualization(blurredFrame)
+        
+        // Step 4: Canny edge detection
+        edgeFrame = CannyEdgeDetection(enhancedFrame, 
+                                       threshold1=100, 
+                                       threshold2=200)
+        
+        // Step 5: Region of Interest (ROI) selection for lane detection
+        laneROI = SelectROI(rawFrame, 
+                           topY=240,      // Focus on road area
+                           bottomY=480,
+                           leftX=0,
+                           rightX=640)
+        
+        // Store processed frame for subsequent analysis
+        ProcessedData.grayFrame = grayFrame
+        ProcessedData.edgeFrame = edgeFrame
+        ProcessedData.laneROI = laneROI
+        
+        RETURN ProcessedData
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+5. LANE DETECTION ALGORITHM
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION DetectLaneMarkings():
+    BEGIN
+        laneROI = ProcessedData.laneROI
+        
+        // Apply color-based filtering for white lane markings
+        // HSV thresholding for white color
+        lower_white = [0, 0, 200]
+        upper_white = [180, 30, 255]
+        
+        whiteMask = InRangeHSV(laneROI, lower_white, upper_white)
+        
+        // Apply morphological operations
+        kernel = CreateKernel(shape=ELLIPSE, size=5x5)
+        whiteMask = MorphClose(whiteMask, kernel)
+        whiteMask = MorphOpen(whiteMask, kernel)
+        
+        // Hough Line Transform to detect straight lines
+        lines = HoughLinesP(whiteMask, 
+                           rho=1,
+                           theta=π/180,
+                           threshold=50,
+                           minLineLength=30,
+                           maxLineGap=10)
+        
+        // Extract lane lines from detected lines
+        leftLines = []
+        rightLines = []
+        
+        FOR each line IN lines DO
+            x1, y1, x2, y2 = line
+            slope = (y2 - y1) / (x2 - x1)
+            
+            // Negative slope = left lane, Positive slope = right lane
+            IF slope < -0.3 THEN
+                Append(leftLines, line)
+            ELSE IF slope > 0.3 THEN
+                Append(rightLines, line)
+            END IF
+        END FOR
+        
+        // Calculate average lane position
+        IF Length(leftLines) > 0 THEN
+            ProcessedData.leftLaneX = AverageXCoordinate(leftLines)
+        END IF
+        
+        IF Length(rightLines) > 0 THEN
+            ProcessedData.rightLaneX = AverageXCoordinate(rightLines)
+        END IF
+        
+        // Calculate lane center
+        laneCenter = (ProcessedData.leftLaneX + ProcessedData.rightLaneX) / 2
+        ProcessedData.laneCenter = laneCenter
+        ProcessedData.laneDetected = TRUE
+        
+        RETURN ProcessedData
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+6. TRAFFIC LIGHT DETECTION
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION DetectTrafficLight():
+    BEGIN
+        frame = SensorData.frame
+        
+        // Method 1: Cascade Classifier Detection
+        trafficLightCascade = GetCascadeClassifier("traffic_light_cascade.xml")
+        detections = trafficLightCascade.detectMultiScale(
+                        image=frame,
+                        scaleFactor=1.1,
+                        minNeighbors=5,
+                        minSize=(30,30),
+                        maxSize=(200,200))
+        
+        ProcessedData.trafficLightDetections = detections
+        
+        IF Length(detections) > 0 THEN
+            // Traffic light found, now classify color
+            FOR each detection IN detections DO
+                x, y, width, height = detection
+                trafficLightROI = ExtractROI(frame, x, y, width, height)
+                
+                // Convert to HSV for color detection
+                hsvFrame = ConvertToHSV(trafficLightROI)
+                
+                // Detect red light
+                redMask = InRangeHSV(hsvFrame, [0, 100, 100], [10, 255, 255])
+                redPixels = CountNonZeroPixels(redMask)
+                
+                // Detect green light
+                greenMask = InRangeHSV(hsvFrame, [40, 100, 100], [80, 255, 255])
+                greenPixels = CountNonZeroPixels(greenMask)
+                
+                // Detect yellow light
+                yellowMask = InRangeHSV(hsvFrame, [15, 100, 100], [35, 255, 255])
+                yellowPixels = CountNonZeroPixels(yellowMask)
+                
+                // Determine dominant color
+                maxPixels = Max(redPixels, greenPixels, yellowPixels)
+                
+                IF maxPixels == redPixels THEN
+                    ProcessedData.trafficLightState = RED
+                    ProcessedData.trafficLightConfidence = redPixels / TotalPixels
+                ELSE IF maxPixels == greenPixels THEN
+                    ProcessedData.trafficLightState = GREEN
+                    ProcessedData.trafficLightConfidence = greenPixels / TotalPixels
+                ELSE IF maxPixels == yellowPixels THEN
+                    ProcessedData.trafficLightState = YELLOW
+                    ProcessedData.trafficLightConfidence = yellowPixels / TotalPixels
+                END IF
+                
+                // Method 2: CNN-based verification (for robustness)
+                cnnInput = PreprocessImage(trafficLightROI, size=224x224)
+                cnnOutput = InferCNNModel(cnnInput)
+                ProcessedData.trafficLightCNNConfidence = GetMaxConfidence(cnnOutput)
+            END FOR
+        ELSE
+            ProcessedData.trafficLightState = NONE
+            ProcessedData.trafficLightDetected = FALSE
+        END IF
+        
+        RETURN ProcessedData
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+7. STOP SIGN DETECTION
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION DetectStopSign():
+    BEGIN
+        frame = SensorData.frame
+        
+        // Use Haar Cascade Classifier for stop sign detection
+        stopSignCascade = GetCascadeClassifier("stop_sign_cascade.xml")
+        
+        detections = stopSignCascade.detectMultiScale(
+                        image=frame,
+                        scaleFactor=1.05,
+                        minNeighbors=5,
+                        minSize=(40,40),
+                        maxSize=(300,300))
+        
+        IF Length(detections) > 0 THEN
+            // Stop sign detected
+            bestDetection = SelectBestDetection(detections)  // Choose most confident
+            x, y, width, height = bestDetection
+            
+            // Calculate distance based on sign size
+            estimatedDistance = CalculateDistance(width, height)
+            
+            ProcessedData.stopSignDetected = TRUE
+            ProcessedData.stopSignLocation = (x, y)
+            ProcessedData.stopSignDistance = estimatedDistance
+            ProcessedData.stopSignConfidence = GetDetectionConfidence(bestDetection)
+            
+            // If stop sign is very close, trigger stopping
+            IF estimatedDistance < 0.5 THEN  // Less than 50cm
+                ProcessedData.stopSignUrgent = TRUE
+            END IF
+        ELSE
+            ProcessedData.stopSignDetected = FALSE
+        END IF
+        
+        RETURN ProcessedData
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+8. OBSTACLE DETECTION
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION DetectObstacles():
+    BEGIN
+        // Method 1: Ultrasonic sensor based detection
+        FOR i = 1 TO 4 DO
+            distance = SensorData.ultrasonicData[i]
+            sensorPosition = GetSensorPosition(i)  // Front, Back, Left, Right
+            
+            // Define danger thresholds
+            DANGER_THRESHOLD = 0.20    // 20 cm
+            WARNING_THRESHOLD = 0.50   // 50 cm
+            
+            IF distance < DANGER_THRESHOLD THEN
+                ProcessedData.obstacleDetected[sensorPosition] = CRITICAL
+                ProcessedData.obstacleDistance[sensorPosition] = distance
+            ELSE IF distance < WARNING_THRESHOLD THEN
+                ProcessedData.obstacleDetected[sensorPosition] = WARNING
+                ProcessedData.obstacleDistance[sensorPosition] = distance
+            ELSE
+                ProcessedData.obstacleDetected[sensorPosition] = CLEAR
+            END IF
+        END FOR
+        
+        // Method 2: Camera-based obstacle detection
+        frame = SensorData.frame
+        cnnModel = GetCNNModel("object_detection_model.tflite")
+        
+        // Prepare input
+        inputTensor = PreprocessImage(frame, size=640x480)
+        
+        // Run inference
+        outputTensors = InferModel(cnnModel, inputTensor)
+        
+        // Parse detections
+        detections = ParseDetections(outputTensors)
+        
+        FOR each detection IN detections DO
+            className = detection.class
+            confidence = detection.confidence
+            boundingBox = detection.boundingBox
+            
+            // Filter by confidence threshold
+            IF confidence > 0.6 THEN
+                ProcessedData.cameraDetections.Append(
+                    {class: className, confidence: confidence, box: boundingBox}
+                )
+            END IF
+        END FOR
+        
+        // Sensor fusion: Combine ultrasonic and camera data
+        ProcessedData.fusedObstacleMap = FuseSensorData(
+            ProcessedData.obstacleDetected,
+            ProcessedData.cameraDetections
+        )
+        
+        RETURN ProcessedData
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+9. MAIN OBJECT DETECTION FUNCTION
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION DetectObjects():
+    BEGIN
+        // Call all detection functions
+        DetectLaneMarkings()
+        DetectTrafficLight()
+        DetectStopSign()
+        DetectObstacles()
+        
+        // Combine all detections into unified perception
+        ProcessedData.allDetections = {
+            lanes: ProcessedData.laneDetected,
+            trafficLight: ProcessedData.trafficLightDetected,
+            stopSign: ProcessedData.stopSignDetected,
+            obstacles: ProcessedData.fusedObstacleMap
+        }
+        
+        RETURN ProcessedData
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+10. LANE KEEPING CONTROL
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION LaneKeepingControl():
+    BEGIN
+        IF ProcessedData.laneDetected == FALSE THEN
+            RETURN 0  // No steering adjustment
+        END IF
+        
+        // Calculate lane center error
+        frameCenter = 640 / 2  // Middle of image (640px width)
+        detectedLaneCenter = ProcessedData.laneCenter
+        
+        // Error: positive = need to turn right, negative = need to turn left
+        laneError = detectedLaneCenter - frameCenter
+        
+        // PID control for steering
+        steeringAngle = SteeringPID.Update(
+            currentError=laneError,
+            desiredSetpoint=0,
+            deltaTime=0.033  // 33ms frame time
+        )
+        
+        // Limit steering angle to realistic values
+        maxSteeringAngle = 45  // degrees
+        steeringAngle = Clamp(steeringAngle, -maxSteeringAngle, maxSteeringAngle)
+        
+        // Convert steering angle to motor speed differential
+        speedDifferential = ConvertAngleToMotorDifference(steeringAngle)
+        
+        RETURN speedDifferential
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+11. DECISION MAKING ENGINE
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION MakeDecisions():
+    BEGIN
+        // Initialize default behavior
+        targetSpeed = 0.3  // 0.3 m/s default cruise speed
+        steeringCommand = 0
+        actionPriority = []
+        
+        // ===== PRIORITY 1: EMERGENCY STOP (Highest Priority) =====
+        IF ProcessedData.obstacleDetected[FRONT] == CRITICAL THEN
+            targetSpeed = 0
+            steeringCommand = 0
+            Append(actionPriority, "EMERGENCY_STOP")
+            ControlCommands.emergencyBrake = TRUE
+            RETURN ControlCommands  // Override all other actions
+        END IF
+        
+        // ===== PRIORITY 2: STOP SIGN =====
+        IF ProcessedData.stopSignDetected == TRUE THEN
+            IF ProcessedData.stopSignUrgent == TRUE THEN
+                // Close to stop sign - come to complete stop
+                targetSpeed = 0
+                ControlCommands.stopSignAction = STOP_AND_HOLD
+                Append(actionPriority, "STOP_SIGN_CRITICAL")
+            ELSE
+                // Stop sign visible but not urgent - slow down
+                targetSpeed = 0.1  // Slow to 0.1 m/s
+                ControlCommands.stopSignAction = APPROACH_STOP_SIGN
+                Append(actionPriority, "STOP_SIGN_DETECTED")
+            END IF
+        END IF
+        
+        // ===== PRIORITY 3: TRAFFIC LIGHT =====
+        IF ProcessedData.trafficLightDetected == TRUE THEN
+            IF ProcessedData.trafficLightState == RED THEN
+                // Red light - stop
+                targetSpeed = 0
+                ControlCommands.trafficLightAction = STOP_AT_LIGHT
+                Append(actionPriority, "RED_LIGHT")
+            ELSE IF ProcessedData.trafficLightState == YELLOW THEN
+                // Yellow light - slow down
+                targetSpeed = 0.15  // Reduce to 0.15 m/s
+                ControlCommands.trafficLightAction = CAUTION_YELLOW
+                Append(actionPriority, "YELLOW_LIGHT")
+            ELSE IF ProcessedData.trafficLightState == GREEN THEN
+                // Green light - proceed
+                targetSpeed = 0.3
+                ControlCommands.trafficLightAction = PROCEED_GREEN
+                Append(actionPriority, "GREEN_LIGHT")
+            END IF
+        END IF
+        
+        // ===== PRIORITY 4: OBSTACLE AVOIDANCE =====
+        IF ProcessedData.obstacleDetected[FRONT] == WARNING THEN
+            // Obstacle ahead - reduce speed
+            targetSpeed = Min(targetSpeed, 0.15)
+            Append(actionPriority, "OBSTACLE_WARNING")
+        END IF
+        
+        IF ProcessedData.obstacleDetected[LEFT] == WARNING THEN
+            // Obstacle on left - steer right
+            steeringCommand = Clamp(steeringCommand + 10, -45, 45)
+            Append(actionPriority, "AVOID_LEFT_OBSTACLE")
+        END IF
+        
+        IF ProcessedData.obstacleDetected[RIGHT] == WARNING THEN
+            // Obstacle on right - steer left
+            steeringCommand = Clamp(steeringCommand - 10, -45, 45)
+            Append(actionPriority, "AVOID_RIGHT_OBSTACLE")
+        END IF
+        
+        // ===== PRIORITY 5: LANE KEEPING (Lowest Priority) =====
+        IF ProcessedData.laneDetected == TRUE AND targetSpeed > 0 THEN
+            laneSteering = LaneKeepingControl()
+            steeringCommand = steeringCommand + laneSteering
+            steeringCommand = Clamp(steeringCommand, -45, 45)
+            Append(actionPriority, "LANE_KEEPING")
+        END IF
+        
+        // Store final control commands
+        ControlCommands.targetSpeed = targetSpeed
+        ControlCommands.steeringAngle = steeringCommand
+        ControlCommands.actionSequence = actionPriority
+        
+        RETURN ControlCommands
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+12. MOTOR CONTROL COMMAND GENERATION
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION SendMotorCommands():
+    BEGIN
+        // Get control commands from decision maker
+        targetSpeed = ControlCommands.targetSpeed
+        steeringAngle = ControlCommands.steeringAngle
+        
+        // Convert steering angle to left/right motor speed differential
+        // Differential drive model:
+        // speedLeft = baseSpeed - (steering * sensitivity)
+        // speedRight = baseSpeed + (steering * sensitivity)
+        
+        steeringSensitivity = 0.5  // Adjust for turning sharpness
+        
+        speedLeft = targetSpeed - (steeringAngle * steeringSensitivity)
+        speedRight = targetSpeed + (steeringAngle * steeringSensitivity)
+        
+        // Limit motor speeds to valid range [-1.0, 1.0]
+        speedLeft = Clamp(speedLeft, -1.0, 1.0)
+        speedRight = Clamp(speedRight, -1.0, 1.0)
+        
+        // Convert to PWM duty cycle (0-255) for motor driver
+        pwmLeft = ConvertSpeedToPWM(speedLeft)   // -255 to 255
+        pwmRight = ConvertSpeedToPWM(speedRight) // -255 to 255
+        
+        // Prepare UART command packet
+        // Format: [START_BYTE][CMD_TYPE][PWM_LEFT][PWM_RIGHT][CHECKSUM]
+        commandPacket = {
+            startByte: 0xFF,
+            commandType: MOTOR_CONTROL,
+            pwmLeft: pwmLeft,
+            pwmRight: pwmRight,
+            checksum: CalculateChecksum(pwmLeft, pwmRight)
+        }
+        
+        // Send to TIVA C microcontroller via UART
+        SendUARTCommand(commandPacket)
+        
+        // Log commands for debugging/monitoring
+        LogMotorCommand(pwmLeft, pwmRight, steeringAngle)
+        
+        RETURN TRUE
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+13. TIVA C MICROCONTROLLER MAIN LOOP (Real-time Motor Control)
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION TIVA_MotorControlLoop():
+    BEGIN
+        WHILE SystemRunning == TRUE DO
+            // Listen for UART commands from Raspberry Pi
+            IF UARTDataAvailable() THEN
+                commandPacket = ReceiveUARTPacket()
+                
+                // Verify packet integrity
+                IF VerifyChecksum(commandPacket) == TRUE THEN
+                    pwmLeft = commandPacket.pwmLeft
+                    pwmRight = commandPacket.pwmRight
+                    
+                    // Apply PWM to motor driver H-Bridge
+                    SetMotorPWM(MOTOR_LEFT, pwmLeft)
+                    SetMotorPWM(MOTOR_RIGHT, pwmRight)
+                    
+                    // Update motor driver direction
+                    IF pwmLeft > 0 THEN
+                        SetMotorDirection(MOTOR_LEFT, FORWARD)
+                    ELSE IF pwmLeft < 0 THEN
+                        SetMotorDirection(MOTOR_LEFT, BACKWARD)
+                        pwmLeft = -pwmLeft  // Make positive for PWM
+                    END IF
+                    
+                    IF pwmRight > 0 THEN
+                        SetMotorDirection(MOTOR_RIGHT, FORWARD)
+                    ELSE IF pwmRight < 0 THEN
+                        SetMotorDirection(MOTOR_RIGHT, BACKWARD)
+                        pwmRight = -pwmRight
+                    END IF
+                    
+                    // Read encoder feedback
+                    leftEncoderCount = ReadEncoderCounter(MOTOR_LEFT)
+                    rightEncoderCount = ReadEncoderCounter(MOTOR_RIGHT)
+                    
+                    // Calculate motor speeds (counts per second)
+                    leftMotorSpeed = leftEncoderCount / ENCODER_RESOLUTION
+                    rightMotorSpeed = rightEncoderCount / ENCODER_RESOLUTION
+                    
+                    // Send feedback to Raspberry Pi
+                    feedbackPacket = {
+                        leftMotorSpeed: leftMotorSpeed,
+                        rightMotorSpeed: rightMotorSpeed,
+                        timestamp: GetSystemTime()
+                    }
+                    SendUARTFeedback(feedbackPacket)
+                    
+                    // Reset encoder counters
+                    ResetEncoderCounter(MOTOR_LEFT)
+                    ResetEncoderCounter(MOTOR_RIGHT)
+                END IF
+            ELSE
+                // No command received - maintain current state or coast
+                ApplyDefaultMotorState()
+            END IF
+            
+            // Wait for next cycle (high-frequency control loop ~100Hz)
+            WAIT 10ms
+        END WHILE
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+14. COMMUNICATION PROTOCOL (UART Serial)
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION UART_SendCommand(commandPacket):
+    BEGIN
+        // UART Configuration: 115200 baud, 8-bit data, no parity, 1 stop bit
+        
+        // Packet structure for motor commands:
+        // [0xFF][0x01][PWM_L_HIGH][PWM_L_LOW][PWM_R_HIGH][PWM_R_LOW][CHECKSUM]
+        
+        buffer = []
+        Append(buffer, 0xFF)  // Start byte
+        Append(buffer, MOTOR_CONTROL)  // Command type (0x01)
+        
+        // PWM values (16-bit, range -255 to 255)
+        pwmLeftHigh = (pwmLeft >> 8) & 0xFF
+        pwmLeftLow = pwmLeft & 0xFF
+        Append(buffer, pwmLeftHigh)
+        Append(buffer, pwmLeftLow)
+        
+        pwmRightHigh = (pwmRight >> 8) & 0xFF
+        pwmRightLow = pwmRight & 0xFF
+        Append(buffer, pwmRightHigh)
+        Append(buffer, pwmRightLow)
+        
+        // Calculate checksum (XOR of all bytes)
+        checksum = 0
+        FOR each byte IN buffer DO
+            checksum = checksum XOR byte
+        END FOR
+        Append(buffer, checksum)
+        
+        // Transmit packet
+        FOR each byte IN buffer DO
+            UART_SendByte(byte)
+        END FOR
+        
+        RETURN TRUE
+    END
+
+
+FUNCTION UART_ReceiveCommand():
+    BEGIN
+        // Wait for start byte
+        startByte = UART_ReceiveByte()
+        
+        IF startByte != 0xFF THEN
+            RETURN NULL  // Invalid packet
+        END IF
+        
+        // Receive remaining bytes
+        commandType = UART_ReceiveByte()
+        pwmLeftHigh = UART_ReceiveByte()
+        pwmLeftLow = UART_ReceiveByte()
+        pwmRightHigh = UART_ReceiveByte()
+        pwmRightLow = UART_ReceiveByte()
+        checksumReceived = UART_ReceiveByte()
+        
+        // Reconstruct 16-bit values
+        pwmLeft = (pwmLeftHigh << 8) | pwmLeftLow
+        pwmRight = (pwmRightHigh << 8) | pwmRightLow
+        
+        // Verify checksum
+        calculatedChecksum = startByte XOR commandType XOR pwmLeftHigh XOR 
+                           pwmLeftLow XOR pwmRightHigh XOR pwmRightLow
+        
+        IF calculatedChecksum == checksumReceived THEN
+            // Valid packet
+            packet = {
+                commandType: commandType,
+                pwmLeft: pwmLeft,
+                pwmRight: pwmRight
+            }
+            RETURN packet
+        ELSE
+            RETURN NULL  // Invalid packet
+        END IF
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+15. HELPER FUNCTIONS
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION ConvertSpeedToPWM(speed):
+    // Input: speed in range [-1.0, 1.0]
+    // Output: PWM value in range [-255, 255]
+    BEGIN
+        pwm = speed * 255
+        RETURN Clamp(pwm, -255, 255)
+    END
+
+
+FUNCTION ConvertAngleToMotorDifference(angle):
+    // Input: steering angle in degrees [-45, 45]
+    // Output: speed differential for left/right motors
+    BEGIN
+        // Normalize angle to [-1.0, 1.0]
+        normalizedAngle = angle / 45
+        
+        // Apply sensitivity factor
+        motorDifference = normalizedAngle * 0.3
+        
+        RETURN motorDifference
+    END
+
+
+FUNCTION CalculateDistance(width, height):
+    // Estimate distance to object based on bounding box size
+    // Uses camera focal length and known object size
+    BEGIN
+        knownObjectWidth = 0.3  // 30cm for stop sign
+        cameraFocalLength = 500  // pixels (from camera calibration)
+        
+        pixelWidth = width
+        
+        distance = (knownObjectWidth * cameraFocalLength) / pixelWidth
+        
+        RETURN distance  // in meters
+    END
+
+
+FUNCTION SelectBestDetection(detections):
+    // Choose detection with highest confidence/largest area
+    BEGIN
+        bestDetection = NULL
+        maxArea = 0
+        
+        FOR each detection IN detections DO
+            x, y, width, height = detection
+            area = width * height
+            
+            IF area > maxArea THEN
+                maxArea = area
+                bestDetection = detection
+            END IF
+        END FOR
+        
+        RETURN bestDetection
+    END
+
+
+FUNCTION FuseSensorData(ultrasonicData, cameraData):
+    // Combine ultrasonic and camera sensor data
+    BEGIN
+        fusedMap = {}
+        
+        // Ultrasonic data has high reliability for distance
+        // Camera data has high reliability for classification
+        
+        FOR each sensorData IN ultrasonicData DO
+            position = sensorData.position
+            distance = sensorData.distance
+            
+            // Check if camera also detected obstacle at same position
+            cameraConfirmed = FALSE
+            FOR each cameraDetection IN cameraData DO
+                IF IsNearPosition(cameraDetection.position, position) THEN
+                    cameraConfirmed = TRUE
+                    confidence = (ultrasonicData.confidence + 
+                                cameraDetection.confidence) / 2
+                END IF
+            END FOR
+            
+            fusedMap[position] = {
+                distance: distance,
+                detected: TRUE,
+                confidence: confidence,
+                cameraConfirmed: cameraConfirmed
+            }
+        END FOR
+        
+        RETURN fusedMap
+    END
+
+
+FUNCTION CalculateChecksum(byte1, byte2, ...):
+    // XOR checksum for data integrity
+    BEGIN
+        checksum = 0
+        FOR each byte IN arguments DO
+            checksum = checksum XOR byte
+        END FOR
+        RETURN checksum
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+16. SYSTEM ERROR HANDLING
+──────────────────────────────────────────────────────────────────────────────
+
+FUNCTION HandleError(errorType):
+    BEGIN
+        SWITCH errorType:
+            CASE COMMUNICATION_LOST:
+                // TIVA C didn't respond - stop motors
+                PRINT "Warning: Communication lost with microcontroller"
+                SendEmergencyStopCommand()
+                
+            CASE SENSOR_MALFUNCTION:
+                // Sensor reading out of range
+                PRINT "Warning: Sensor malfunction detected"
+                DisableSensorReading()
+                RelySOnAlternativeSensors()
+                
+            CASE SYSTEM_OVERLOAD:
+                // Processing speed exceeded
+                PRINT "Warning: System overload - reducing processing complexity"
+                ReduceModelComplexity()
+                SkipFrames()
+                
+            CASE MOTOR_FAILURE:
+                // Motor not responding to commands
+                PRINT "Error: Motor failure detected"
+                SendEmergencyStopCommand()
+                LogError()
+                
+            DEFAULT:
+                PRINT "Unknown error: " + errorType
+                SendEmergencyStopCommand()
+        END SWITCH
+    END
+
+
+──────────────────────────────────────────────────────────────────────────────
+17. COMPLETE EXECUTION FLOW DIAGRAM
+──────────────────────────────────────────────────────────────────────────────
+
+MAIN PROGRAM:
+    InitializeSystem()
+    
+    WHILE TRUE DO:
+        ┌─ SENSOR ACQUISITION (50ms) ──────────────────┐
+        │ • Capture camera frame                       │
+        │ • Read ultrasonic sensors                    │
+        │ • Read infrared sensors                      │
+        │ • Request encoder feedback from TIVA C      │
+        └──────────────────────────────────────────────┘
+                            ↓
+        ┌─ IMAGE PROCESSING (33ms) ───────────────────┐
+        │ • Convert to grayscale                       │
+        │ • Apply blur and edge detection             │
+        │ • Extract lane ROI                           │
+        └──────────────────────────────────────────────┘
+                            ↓
+        ┌─ OBJECT DETECTION (45ms) ───────────────────┐
+        │ • Detect lane markings (Hough Transform)    │
+        │ • Detect traffic lights (Cascade + Color)   │
+        │ • Detect stop signs (Cascade Classifier)    │
+        │ • Detect obstacles (Ultrasonic + CNN)       │
+        └──────────────────────────────────────────────┘
+                            ↓
+        ┌─ DECISION MAKING (10ms) ────────────────────┐
+        │ Priority-based decision:                     │
+        │ 1. Emergency stop (obstacles)               │
+        │ 2. Traffic signals                          │
+        │ 3. Obstacle avoidance                       │
+        │ 4. Lane keeping                             │
+        │ 5. Cruise control                           │
+        └──────────────────────────────────────────────┘
+                            ↓
+        ┌─ MOTOR COMMAND (5ms) ────────────────────────┐
+        │ • Convert steering angle to motor speeds    │
+        │ • Generate PWM commands                      │
+        │ • Send via UART to TIVA C                   │
+        └──────────────────────────────────────────────┘
+                            ↓
+        └─ WAIT FOR NEXT FRAME (33.33ms) ─────────────┘
+
+
+═══════════════════════════════════════════════════════════════════════════════
+                            END OF PSEUDOCODE
+═══════════════════════════════════════════════════════════════════════════════
